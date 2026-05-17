@@ -1,262 +1,228 @@
-name: دانلودر زیرنویس یوتیوب
-
+name: ytld-sub Release
 on:
-  workflow_dispatch:
-    inputs:
-      video_url:
-        description: 'YouTube video URL'
-        required: true
-        type: string
-
-      upload_method:
-        description: '📤 روش ذخیره نهایی'
-        required: true
-        type: choice
-        options:
-          - repository (push to repo)
-          - release (GitHub Releases)
-        default: 'repository (push to repo)'
-
-      release_tag:
-        description: '🏷️ نام تگ ریلیز (فقط در صورت انتخاب Release)'
-        required: false
-        type: string
-        default: ''
-
-permissions:
-  contents: write
-
+  push:
+    # publish only when pushed to master
+    branches:
+      - master
+  pull_request:
+env:
+  ACTIONS_STEP_DEBUG: true
+  ACTIONS_RUNNER_DEBUG: true
 jobs:
-  fetch-subtitles:
+  version:
+    name: version
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      pypi_version: ${{ steps.set_outputs.outputs.pypi_version }}
+      local_version: ${{ steps.set_outputs.outputs.local_version }}
+      init_contents: ${{ steps.set_outputs.outputs.init_contents }}
 
     steps:
-      - name: 📂 Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          ref: master
 
-      - name: 🔧 Install Dependencies
+      - name: Set date and commit hash variables
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y zip curl python3 python3-pip
-          pip3 install --quiet youtube-transcript-api requests
+          echo "DATE=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+          echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: 🎬 Download Subtitles (English & Persian)
-        id: download
+      - name: Count number of commits on master on day, minus 1 to account for post-push
         run: |
-          python3 << 'EOF'
-          import os, sys, re, json
-          from youtube_transcript_api import YouTubeTranscriptApi
-          from youtube_transcript_api.formatters import SRTFormatter
-
-          URL = os.environ.get('INPUT_URL')
-
-          # Extract video ID from URL
-          def extract_video_id(url):
-              patterns = [
-                  r'(?:v=|\/)([0-9A-Za-z_-]{11})(?:[?&]|$)',
-                  r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})',
-                  r'(?:embed\/)([0-9A-Za-z_-]{11})'
-              ]
-              for pattern in patterns:
-                  match = re.search(pattern, url)
-                  if match:
-                      return match.group(1)
-              return None
-
-          video_id = extract_video_id(URL)
-          if not video_id:
-              print("::error::Could not extract video ID from URL")
-              sys.exit(1)
-
-          print(f"📹 Video ID: {video_id}")
-          print(f"🎬 Downloading subtitles in English (en) and Persian (fa)")
-
-          # Get video info to fetch title
-          try:
-              import requests
-              info_url = f"https://noembed.com/embed?url=https://www.youtube.com/watch?v={video_id}"
-              resp = requests.get(info_url, timeout=10)
-              if resp.status_code == 200:
-                  data = resp.json()
-                  video_title = data.get('title', video_id)
-              else:
-                  video_title = video_id
-          except:
-              video_title = video_id
-
-          # Clean video title for filename
-          safe_title = re.sub(r'[^\w\s\-_\(\)\[\]]', '_', video_title)
-          safe_title = re.sub(r'\s+', ' ', safe_title).strip()
-          safe_title = safe_title[:50]  # Limit length
-
-          print(f"📝 Video title: {safe_title}")
-
-          # Create downloads directory
-          os.makedirs("downloads", exist_ok=True)
-
-          # Language mapping
-          languages = {
-              'en': 'English',
-              'fa': 'Persian'
-          }
-
-          srt_formatter = SRTFormatter()
-
-          # Try to get transcripts
-          downloaded = False
-          
-          for lang_code, lang_name in languages.items():
-              try:
-                  print(f"🔄 Trying to download {lang_name} ({lang_code}) subtitles...")
-                  
-                  # Get transcript list
-                  transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                  
-                  transcript = None
-                  
-                  # Try to find exact language match
-                  try:
-                      transcript = transcript_list.find_transcript([lang_code])
-                  except:
-                      # If Persian not found, try to find and translate
-                      if lang_code == 'fa':
-                          print(f"   ⚠️ Persian not found, trying to translate from English...")
-                          try:
-                              eng_transcript = transcript_list.find_transcript(['en'])
-                              transcript = eng_transcript.translate('fa')
-                              print(f"   ✅ Persian subtitle generated by translation from English")
-                          except:
-                              print(f"   ❌ Could not translate to Persian")
-                              continue
-                      else:
-                          print(f"   ❌ {lang_name} not found")
-                          continue
-                  
-                  # Fetch the transcript
-                  transcript_data = transcript.fetch()
-                  
-                  # Format as SRT
-                  srt_content = srt_formatter.format_transcript(transcript_data)
-                  
-                  # Save to file
-                  filename = f"downloads/{safe_title}_{lang_code}.srt"
-                  with open(filename, 'w', encoding='utf-8') as f:
-                      f.write(srt_content)
-                  
-                  # Count lines
-                  line_count = len(transcript_data)
-                  print(f"   ✅ Downloaded {lang_name} subtitle - {line_count} lines")
-                  print(f"   📁 Saved to: {filename}")
-                  downloaded = True
-                  
-              except Exception as e:
-                  print(f"   ❌ Error downloading {lang_name}: {str(e)}")
-                  continue
-
-          if not downloaded:
-              print("::error::No subtitles were downloaded!")
-              print("Possible reasons:")
-              print("  - Video has no subtitles")
-              print("  - English and Persian subtitles are not available")
-              print("  - YouTube API is rate limited")
-              sys.exit(1)
-
-          # Save video info
-          info_file = "downloads/video_info.json"
-          with open(info_file, 'w', encoding='utf-8') as f:
-              json.dump({
-                  'video_id': video_id,
-                  'video_title': video_title,
-                  'video_url': URL,
-                  'download_date': os.popen('date').read().strip()
-              }, f, indent=2, ensure_ascii=False)
-          
-          print(f"\n✅ Download completed!")
-          print(f"📁 Files saved in 'downloads' folder")
-
-          EOF
-        env:
-          INPUT_URL: ${{ github.event.inputs.video_url }}
-
-      - name: 📋 Verify Subtitle Files
+          echo "DATE_COMMIT_COUNT=$(($(git rev-list --count master --since='${{ env.DATE }} 00:00:00')-1))" >> $GITHUB_ENV
+      - name: Set pypi and local version values
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ زیرنویس‌های دانلود شده با فرمت SRT:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
-          if [ -d "downloads" ] && [ "$(ls -A downloads/*.srt 2>/dev/null)" ]; then
-            ls -lh downloads/
-            
-            for file in downloads/*.srt; do
-              if [ -f "$file" ]; then
-                echo ""
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "📄 فایل: $(basename "$file")"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "📝 10 خط اول فایل:"
-                echo "────────────────────────────────────────"
-                head -15 "$file"
-                echo "────────────────────────────────────────"
-                echo "📊 حجم فایل: $(du -h "$file" | cut -f1)"
-              fi
-            done
+          echo "LOCAL_VERSION=${{ env.DATE }}+${{ env.COMMIT_HASH }}" >> $GITHUB_ENV
+          if [ ${{ env.DATE_COMMIT_COUNT }} -le "0" ]
+          then
+            echo "PYPI_VERSION=${{ env.DATE }}" >> $GITHUB_ENV
           else
-            echo "❌ هیچ زیرنویسی دانلود نشد!"
-            exit 1
+            echo "PYPI_VERSION=${{ env.DATE }}.post${{ env.DATE_COMMIT_COUNT }}" >> $GITHUB_ENV
           fi
-          
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✨ همه فایل‌ها در پوشه 'downloads' ذخیره شدند"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: 📅 Get Current Date
-        id: get_date
-        run: echo "date=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
-
-      - name: 📤 Push to Repository
-        if: github.event.inputs.upload_method == 'repository (push to repo)'
+      - name: Test versions
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/
-          git commit -m "🎬 دانلود زیرنویس یوتیوب (انگلیسی و فارسی) با تایم‌استمپ [skip ci]" || echo "Nothing to commit"
-          git push
-          echo "✅ فایل‌ها به ریپازیتوری در پوشه 'downloads' اضافه شدند"
+          echo "${{ env.PYPI_VERSION }}"
+          echo "${{ env.LOCAL_VERSION }}"
 
-      - name: 📤 Upload to GitHub Releases
-        if: github.event.inputs.upload_method == 'release (GitHub Releases)'
-        uses: softprops/action-gh-release@v2
+      - id: set_outputs
+        run: |
+          echo "pypi_version=${{ env.PYPI_VERSION }}" >> "$GITHUB_OUTPUT"
+          echo "local_version=${{ env.LOCAL_VERSION }}" >> "$GITHUB_OUTPUT"
+          echo 'init_contents=__pypi_version__ = "${{ env.PYPI_VERSION }}";__local_version__ = "${{ env.LOCAL_VERSION }}"' >> "$GITHUB_OUTPUT"
+
+  ##################################################################################################
+
+  build-linux:
+    name: build-linux
+    needs:
+      - version
+    strategy:
+      matrix:
+        arch: [ "aarch64", "x86_64" ]
+        include:
+          - arch: "aarch64"
+            runner: "ubuntu-24.04-arm"
+            container: "quay.io/pypa/manylinux_2_28_aarch64"
+          - arch: "x86_64"
+            runner: "ubuntu-latest"
+            container: "quay.io/pypa/manylinux_2_28_x86_64"
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Write version to init file
+        run: |
+          echo '${{ needs.version.outputs.init_contents }}' > src/ytdl_sub/__init__.py
+      - name: Install base packages
+        run: |
+          cat /etc/os-release
+          dnf update -y
+          dnf install -y epel-release tar wget make gcc openssl-devel bzip2-devel libffi-devel zlib-devel
+      - name: Install Python
+        run: |
+          wget https://www.python.org/ftp/python/3.12.9/Python-3.12.9.tar.xz
+          tar -xf Python-3.12.9.tar.xz
+          cd Python-3.12.9 && ./configure --with-ensurepip=install --prefix=/usr/local --enable-shared LDFLAGS="-Wl,-rpath /usr/local/lib"
+          make -j 8
+          make altinstall
+          python3.12 --version
+          python3.12 -m ensurepip --upgrade
+      - name: Build Package
+        run: |
+          python3.12 -m pip install -e .
+          python3.12 -m pip install pyinstaller
+          # Build executable
+          pyinstaller ytdl-sub.spec
+          mkdir -p /opt/builds
+          chmod ugo+rwx dist/ytdl-sub
+          dist/ytdl-sub -h
+          mv dist/ytdl-sub /opt/builds/ytdl-sub_${{ matrix.arch }}
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('subtitles-{0}', github.run_number) }}
-          name: ${{ format('زیرنویس YouTube - {0}', github.run_number) }}
-          body: |
-            ## 🎬 زیرنویس‌های دانلود شده از YouTube
-            
-            **🔗 لینک ویدیو:** ${{ github.event.inputs.video_url }}
-            
-            **📝 جزئیات:**
-            - **زبان‌ها:** انگلیسی (en) و فارسی (fa)
-            - **فرمت:** SRT با تایم‌استمپ کامل
-            - **تاریخ دانلود:** ${{ steps.get_date.outputs.date }}
-            
-            **📁 محتویات:**
-            - فایل‌های SRT با زمان‌بندی دقیق
-            - هر زیرنویس شامل تایم‌استمپ شروع و پایان
-            - آماده برای استفاده در پلیرهای مختلف
-            
-            ---
-            ⚡ با استفاده از GitHub Actions
-            
-            💡 **نکته:** فایل‌ها در پوشه `downloads` قرار دارند
-          files: downloads/*
-          token: ${{ secrets.GITHUB_TOKEN }}
+          name: ytdl-sub_${{ matrix.arch }}
+          path: /opt/builds/ytdl-sub_${{ matrix.arch }}
+
+  ##################################################################################################
+
+  build-windows:
+    name: build-windows
+    needs:
+      - version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+      - name: Write version to init file
+        run: |
+          echo '${{ needs.version.outputs.init_contents }}'> src/ytdl_sub/__init__.py
+      - name: Build Package
+        run: |
+          python -m pip install -e .
+          python -m pip install pyinstaller
+          pyinstaller ytdl-sub.spec
+          .\dist\ytdl-sub.exe -h
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytdl-sub_exe
+          path: .\dist\ytdl-sub.exe
+
+  ##################################################################################################
+
+  github-release:
+    name: github-release
+    needs:
+      - version
+      - build-linux
+      - build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Write version to init file
+        run: |
+          echo '${{ needs.version.outputs.init_contents }}' > src/ytdl_sub/__init__.py
+
+      - name: Restore exe build
+        uses: actions/download-artifact@v4
+        with:
+          name: ytdl-sub_exe
+          path: /opt/builds
+
+      - name: Restore aarch64 build
+        uses: actions/download-artifact@v4
+        with:
+          name: ytdl-sub_aarch64
+          path: /opt/builds
+
+      - name: Restore x86_64 build
+        uses: actions/download-artifact@v4
+        with:
+          name: ytdl-sub_x86_64
+          path: /opt/builds
+
+      - name: Rename x86_64 build
+        run: |
+          mv /opt/builds/ytdl-sub_x86_64 /opt/builds/ytdl-sub
+
+      - name: Inspect build directory, rename x86_64 build
+        run: |
+          ls -lh /opt/builds
+
+      - name: Create Release
+        if: ${{
+          github.ref == 'refs/heads/master'
+          && !contains(github.event.head_commit.message, '[DEV]')
+          && !contains(github.event.head_commit.message, '[DOCS]')
+          }}
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ytdl-sub ${{ needs.version.outputs.pypi_version }}
+          tag_name: ${{ needs.version.outputs.pypi_version }}
+          body: ${{ github.event.head_commit.message }}
           draft: false
           prerelease: false
+          files: |
+            /opt/builds/ytdl-sub
+            /opt/builds/ytdl-sub_aarch64
+            /opt/builds/ytdl-sub.exe
 
-      - name: 🧹 Cleanup
-        if: always() && github.event.inputs.upload_method == 'release (GitHub Releases)'
-        run: rm -rf downloads 2>/dev/null || true
+  pypi-publish:
+    name: pypi-publish
+    needs:
+      - version
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      - name: Write version to init file
+        run: |
+          echo '${{ needs.version.outputs.init_contents }}' > src/ytdl_sub/__init__.py
+      - name: Build wheel
+        run: |
+          # Build wheel
+          pip install -e .
+          pip install build
+          python3 -m build
+
+      - name: Publish distribution 📦 to PyPI
+        if: ${{
+          github.ref == 'refs/heads/master'
+          && !contains(github.event.head_commit.message, '[DEV]')
+          && !contains(github.event.head_commit.message, '[DOCS]')
+          }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
